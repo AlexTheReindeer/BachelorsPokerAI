@@ -70,25 +70,41 @@ def encode_observation(hole_card, community_card, round_state):
     return obs
 
 class PPOPlayer(BasePokerPlayer):
-    def __init__(self, ppo_agent):
+    def __init__(self, agent):
         super().__init__()
-        self.ppo_agent = ppo_agent
-        self.last_obs = None
+        self.agent = agent
+        self.uuid = None
+        self.name = "PPO Player"
+        self.total_reward = 0
+        self.wins = 0
+        self.total_hands = 0
         self.game_state = {
-            'round_state': {},
+            'round_state': {
+                'seats': [],
+                'community_card': [],
+                'pot': {'main': {'amount': 0}},
+                'dealer_pos': 0,
+                'street': 'preflop'
+            },
             'hole_card': [],
             'community_card': [],
             'hand_over': False
         }
         self.current_reward = 0
+        self.last_obs = None
 
     # Required callbacks:
     def receive_game_start_message(self, game_info):
         pass
 
     def receive_round_start_message(self, round_count, hole_card, seats):
-        self.game_state['hole_card'] = hole_card
+        """Called at the start of each round"""
+        # Update game state
         self.game_state['round_state']['seats'] = seats
+        self.game_state['hole_card'] = hole_card
+        self.game_state['community_card'] = []
+        self.game_state['hand_over'] = False
+        self.current_reward = 0
 
     def receive_street_start_message(self, street, round_state):
         """Called when a new street starts"""
@@ -97,11 +113,11 @@ class PPOPlayer(BasePokerPlayer):
             self.game_state['community_card'] = round_state['community_cards']
             
         # Print street information
-        print("\n=== New Street ===")
-        print(f"Street: {street}")
-        if round_state.get('community_cards'):
-            print(f"Community cards: {', '.join(round_state['community_cards'])}")
-        print("==================\n")
+        # print("\n=== New Street ===")
+        # print(f"Street: {street}")
+        # if round_state.get('community_cards'):
+        #     print(f"Community cards: {', '.join(round_state['community_cards'])}")
+        # print("==================\n")
 
     def receive_game_update(self, action, round_state):
         """
@@ -115,123 +131,130 @@ class PPOPlayer(BasePokerPlayer):
         self.game_state['round_state'].update(round_state)
         
         # Print action information
-        print("\n=== Action Update ===")
-        print(f"Street: {round_state.get('street', 'unknown')}")
-        if round_state.get('community_cards'):
-            print(f"Community cards: {', '.join(round_state['community_cards'])}")
-        player_name = new_action.get('uuid', 'unknown')
-        print(f"Player: {player_name}")
-        print(f"Action: {new_action.get('action', 'unknown')}")
-        if 'amount' in new_action:
-            print(f"Amount: {new_action['amount']}")
-        print("===================\n")
+        # print("\n=== Action Update ===")
+        # print(f"Street: {round_state.get('street', 'unknown')}")
+        # if round_state.get('community_cards'):
+        #     print(f"Community cards: {', '.join(round_state['community_cards'])}")
+        # player_name = new_action.get('uuid', 'unknown')
+        # print(f"Player: {player_name}")
+        # print(f"Action: {new_action.get('action', 'unknown')}")
+        # if 'amount' in new_action:
+        #     print(f"Amount: {new_action['amount']}")
+        # print("===================\n")
 
     def receive_round_result_message(self, winners, hand_info, round_state):
         """Called at the end of each hand"""
-        print("\n=== Round Result ===")
-        print(f"Street: {round_state.get('street', 'showdown')}")
-        if round_state.get('community_cards'):
-            print(f"Community cards: {', '.join(round_state['community_cards'])}")
-        print("Winners:", [w.get('name', w.get('uuid', 'unknown')) for w in winners])
-        
         # Calculate final reward based on whether we won or lost
         is_winner = any(w.get('uuid') == self.uuid for w in winners)
         pot_size = round_state['pot']['main']['amount']
         our_contribution = pot_size / 2  # In heads-up, we contribute half the pot
         
-        # If we won, we get the pot. If we lost, we lose our contribution to the pot
-        final_reward = pot_size if is_winner else -our_contribution  # Lose our entire contribution when we lose
-        
-        print(f"Winner: {'Prodigy' if is_winner else 'Trainer'}")
-        print(f"Final reward: {final_reward}")
-        print("===================\n")
+        # Calculate reward based only on chips won/lost
+        if is_winner:
+            # If we won, get the pot minus our contribution
+            final_reward = pot_size - our_contribution
+        else:
+            # If we lost, lose our contribution
+            final_reward = -our_contribution
         
         # Store final reward
         self.current_reward = final_reward
-        self.ppo_agent.store_reward(final_reward, True)
+        self.agent.store_reward(final_reward, True, {'hand_result': 'win' if is_winner else 'loss'})
         self.last_obs = None
         self.game_state['hand_over'] = True
 
     # Actual action logic
     def declare_action(self, valid_actions, hole_card, round_state):
-        """
-        1) Build observation
-        2) Use the action passed from the environment
-        3) Return the PyPokerEngine action + bet amount
-        """
-        # Get community cards safely
-        community_cards = []
-        if isinstance(round_state, dict):
-            if 'street' in round_state:
-                street = round_state['street']
-                if street == 1:  # Flop
-                    community_cards = round_state.get('community_cards', [])[:3]
-                elif street == 2:  # Turn
-                    community_cards = round_state.get('community_cards', [])[:4]
-                elif street == 3:  # River
-                    community_cards = round_state.get('community_cards', [])[:5]
+        obs = self.get_observation(hole_card, round_state)
+        action_tuple = self.agent.select_action(obs)
+        action = action_tuple[0]  # Get the action index
+        
+        # Map action index to poker action
+        if action == 0:  # Fold
+            return valid_actions[0]['action'], valid_actions[0]['amount']
+        elif action == 1:  # Call
+            return valid_actions[1]['action'], valid_actions[1]['amount']
+        else:  # Raise with different amounts
+            pot_size = round_state['pot'].get('main', {}).get('amount', 0)
+            min_raise = valid_actions[2]['amount']['min']
+            max_raise = valid_actions[2]['amount']['max']
+            
+            if action == 2:  # Min raise
+                raise_amount = min_raise
+            elif action == 3:  # Small raise (1/4 pot)
+                raise_amount = min(max(min_raise, pot_size // 4), max_raise)
+            elif action == 4:  # Medium raise (1/2 pot)
+                raise_amount = min(max(min_raise, pot_size // 2), max_raise)
+            elif action == 5:  # Large raise (3/4 pot)
+                raise_amount = min(max(min_raise, 3 * pot_size // 4), max_raise)
+            else:  # Full pot raise
+                raise_amount = min(max(min_raise, pot_size), max_raise)
+                
+            return valid_actions[2]['action'], raise_amount
+
+    def get_observation(self, hole_card=None, round_state=None):
+        """Get the current observation with enhanced encoding"""
+        # Use provided values or fall back to game state
+        if hole_card is None:
+            hole_card = self.game_state.get('hole_card', [])
+        if round_state is None:
+            round_state = self.game_state.get('round_state', {})
+            
+        obs = np.zeros(117)  # Updated dimension
+        
+        try:
+            # Encode hole cards (52 dimensions, one-hot)
+            for card in hole_card:
+                rank_idx = self._get_rank_index(card[0])
+                suit_idx = self._get_suit_index(card[1])
+                card_idx = rank_idx * 4 + suit_idx
+                obs[card_idx] = 1
+                
+            # Encode community cards (52 dimensions, one-hot)
+            community_cards = round_state.get('community_card', [])
+            for card in community_cards:
+                rank_idx = self._get_rank_index(card[0])
+                suit_idx = self._get_suit_index(card[1])
+                card_idx = 52 + rank_idx * 4 + suit_idx
+                obs[card_idx] = 1
+                
+            # Normalize pot size and current bet (2 dimensions)
+            pot = round_state.get('pot', {})
+            if isinstance(pot, dict):
+                pot_size = pot.get('main', {}).get('amount', 0)
             else:
-                # If no street info, just get all community cards
-                community_cards = round_state.get('community_cards', [])
-        
-        # Get the action from the environment
-        act_id = self.ppo_agent.last_action if hasattr(self.ppo_agent, 'last_action') else None
-        
-        if act_id is None:
-            # If no action was passed, make our own decision
-            obs = encode_observation(hole_card, community_cards, round_state)
-            act_id = self.ppo_agent.select_action(obs)
-            self.ppo_agent.store_reward(0.0, False)
+                pot_size = 0
+            initial_stack = 1000  # Assuming initial stack of 1000
+            obs[104] = pot_size / (2 * initial_stack)  # Normalize by max possible pot
+            
+            current_bet = round_state.get('current_bet', 0)
+            obs[105] = current_bet / initial_stack  # Normalize by initial stack
+            
+            # Encode position relative to dealer and current street (6 dimensions)
+            dealer_pos = round_state.get('dealer_btn', 0)
+            my_pos = round_state.get('next_player', 0)
+            relative_pos = (my_pos - dealer_pos) % 6
+            obs[106 + relative_pos] = 1
+            
+            # Encode current street (4 dimensions)
+            street_idx = {'preflop': 0, 'flop': 1, 'turn': 2, 'river': 3}
+            current_street = round_state.get('street', 'preflop')
+            obs[112 + street_idx[current_street]] = 1
+            
+            # Add opponent modeling features
+            seats = round_state.get('seats', [])
+            for i, seat in enumerate(seats):
+                if seat.get('uuid') != self.uuid:
+                    stack = seat.get('stack', 0)
+                    obs[116] = stack / initial_stack  # Normalize opponent stack
+                    
+        except Exception as e:
+            print(f"Error in get_observation: {e}")
+            # Return zero observation in case of error
+            return np.zeros(117)
+            
+        return obs
 
-        # Convert act_id => fold/call/raise
-        if act_id == 0:
-            # Find fold action
-            for va in valid_actions:
-                if va['action'] == 'fold':
-                    return 'fold', va['amount']
-            return 'fold', 0
-        elif act_id == 1:
-            # Find call action
-            for va in valid_actions:
-                if va['action'] == 'call':
-                    return 'call', va['amount']
-            return 'fold', 0
-        else:
-            # Find raise action
-            for va in valid_actions:
-                if va['action'] == 'raise':
-                    # Get min and max raise amounts
-                    min_amount = va['amount']['min']
-                    max_amount = va['amount']['max']
-                    
-                    # Ensure min_amount is at least the big blind
-                    big_blind = round_state.get('small_blind_amount', 10) * 2
-                    min_amount = max(min_amount, big_blind)
-                    
-                    # Ensure max_amount doesn't exceed player's stack
-                    player_stack = round_state.get('seats', [{}])[0].get('stack', 1000)
-                    max_amount = min(max_amount, player_stack)
-                    
-                    # If max_amount is less than min_amount, use min_amount
-                    if max_amount < min_amount:
-                        raise_amount = min_amount
-                    else:
-                        # Calculate raise amount between min and max
-                        raise_amount = random.randint(min_amount, max_amount)
-                    
-                    return 'raise', raise_amount
-            return 'fold', 0
-
-    def get_observation(self):
-        """Get the current observation from the game state"""
-        # Get current game state
-        round_state = self.game_state.get('round_state', {})
-        hole_card = self.game_state.get('hole_card', [])
-        community_card = self.game_state.get('community_card', [])
-        
-        # Encode observation
-        return encode_observation(hole_card, community_card, round_state)
-        
     def get_reward(self):
         """Get the current reward"""
         return self.current_reward
@@ -239,3 +262,28 @@ class PPOPlayer(BasePokerPlayer):
     def is_hand_over(self):
         """Check if the current hand is over"""
         return self.game_state.get('hand_over', False)
+
+    def _get_suit_index(self, suit):
+        """Convert card suit to index (h=0, d=1, c=2, s=3)"""
+        try:
+            suit_map = {'h': 0, 'd': 1, 'c': 2, 's': 3}
+            return suit_map.get(suit.lower(), 0)  # Default to 0 if suit not found
+        except Exception as e:
+            print(f"Error parsing suit {suit}: {e}")
+            return 0  # Return 0 as default index
+
+    def _get_rank_index(self, rank):
+        """Convert card rank to index (A=12, K=11, Q=10, J=9, T=8, 9-2=7-0)"""
+        try:
+            # Handle case where full card string is passed
+            if len(rank) > 1:
+                rank = rank[1:]  # Take everything after the suit
+                
+            rank_map = {
+                'A': 12, 'K': 11, 'Q': 10, 'J': 9, 'T': 8,
+                '9': 7, '8': 6, '7': 5, '6': 4, '5': 3, '4': 2, '3': 1, '2': 0
+            }
+            return rank_map.get(rank, 0)  # Default to 0 if rank not found
+        except Exception as e:
+            print(f"Error parsing rank {rank}: {e}")
+            return 0  # Return 0 as default index
