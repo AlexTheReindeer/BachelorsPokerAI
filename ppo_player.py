@@ -120,10 +120,6 @@ class PPOPlayer(BasePokerPlayer):
         # print("==================\n")
 
     def receive_game_update(self, action, round_state):
-        """
-        REMOVE partial reward here. 
-        We'll only store partial reward in declare_action to keep states and rewards in sync.
-        """
         pass
 
     def receive_game_update_message(self, new_action, round_state):

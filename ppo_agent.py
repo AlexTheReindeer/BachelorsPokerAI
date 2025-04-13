@@ -83,10 +83,6 @@ class ValueNet(nn.Module):
         return value
 
 class PPOAgent:
-    """
-    A minimal PPO agent for poker. 
-    We'll store transitions after each action, then do an update at the end of each hand.
-    """
     def __init__(self, input_dim=107, output_dim=5, hidden_dim=256, load_existing=False):
         self.policy_net = PolicyNet(input_dim, hidden_dim, output_dim)
         self.value_net = ValueNet(input_dim, hidden_dim)
